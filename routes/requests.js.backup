@@ -1,0 +1,516 @@
+const express = require('express');
+const router = express.Router();
+const { query } = require('../config/database');
+const { verifyToken, requireRole, requireOwnershipOrAdmin } = require('../middleware/auth');
+const { validateRequest, validateId, validatePagination } = require('../middleware/validation');
+const { autoAuditLog, AUDIT_ACTIONS } = require('../middleware/audit');
+
+// Accept/reject request (target user only)
+router.patch('/:id/respond',
+  verifyToken,
+  validateId,
+  autoAuditLog(AUDIT_ACTIONS.UPDATE_REQUEST_STATUS, 'request'),
+  async (req, res) => {
+    try {
+      const requestId = req.params.id;
+      const { status } = req.body;
+      const userId = req.user.id;
+
+      if (!['accepted', 'rejected'].includes(status)) {
+        return res.status(400).json({ error: 'Status must be either accepted or rejected' });
+      }
+
+      // Check if request exists and user is the target
+      const requests = await query(
+        'SELECT id, status, sender_id, target_user_id FROM requests WHERE id = ?',
+        [requestId]
+      );
+
+      if (requests.length === 0) {
+        return res.status(404).json({ error: 'Request not found' });
+      }
+
+      const request = requests[0];
+
+      if (request.target_user_id !== userId) {
+        return res.status(403).json({ error: 'You can only respond to requests sent to you' });
+      }
+
+      if (request.status !== 'pending') {
+        return res.status(400).json({ error: 'Only pending requests can be responded to' });
+      }
+
+      // Update request status
+      await query(
+        `UPDATE requests 
+         SET status = ?, updated_at = CURRENT_TIMESTAMP 
+         WHERE id = ?`,
+        [status, requestId]
+      );
+
+      // Get updated request
+      const updatedRequests = await query(
+        `SELECT r.*, 
+                sender.name as sender_name,
+                target.name as target_name,
+                l.title as listing_title
+         FROM requests r
+         JOIN users sender ON r.sender_id = sender.id
+         JOIN users target ON r.target_user_id = target.id
+         LEFT JOIN listings l ON r.listing_id = l.id
+         WHERE r.id = ?`,
+        [requestId]
+      );
+
+      res.json({
+        message: `Request ${status} successfully`,
+        request: updatedRequests[0]
+      });
+
+    } catch (error) {
+      console.error('Respond to request error:', error);
+      res.status(500).json({ error: 'Failed to respond to request' });
+    }
+  }
+);
+
+// Update request status (admin only)
+router.patch('/:id/status',
+  verifyToken,
+  validateId,
+  requireRole(['admin']),
+  autoAuditLog(AUDIT_ACTIONS.UPDATE_REQUEST_STATUS, 'request'),
+  async (req, res) => {
+    try: autoAuditLog, AUDIT_ACTIONS } = require('../middleware/audit');
+
+// Create request
+router.post('/',
+  verifyToken,
+  validateRequest,
+  autoAuditLog(AUDIT_ACTIONS.CREATE_REQUEST, 'request'),
+  async (req, res) => {
+    try {
+      const requesterId = req.user.id;
+      const { target_user_id, listing_id, type, message } = req.body;
+
+      // Check if listing exists and is active
+      const listings = await query(
+        `SELECT l.*, u.role as owner_role 
+         FROM listings l 
+         JOIN users u ON l.user_id = u.id
+         WHERE l.id = ? AND l.status = 'active' AND u.is_active = true`,
+        [listing_id]
+      );
+
+      if (listings.length === 0) {
+        return res.status(404).json({ error: 'Listing not found or inactive' });
+      }
+
+      const listing = listings[0];
+
+      // Verify target user is the listing owner
+      if (listing.user_id !== parseInt(target_user_id)) {
+        return res.status(400).json({ error: 'Target user must be the listing owner' });
+      }
+
+      // Prevent self-requests
+      if (requesterId === parseInt(target_user_id)) {
+        return res.status(400).json({ error: 'Cannot create request for your own listing' });
+      }
+
+      // Check if user already has a pending request for this listing
+      const existingRequests = await query(
+        `SELECT id FROM requests 
+         WHERE sender_id = ? AND listing_id = ? AND status = 'pending'`,
+        [requesterId, listing_id]
+      );
+
+      if (existingRequests.length > 0) {
+        return res.status(409).json({ error: 'You already have a pending request for this listing' });
+      }
+
+      // Create request
+      const result = await query(
+        `INSERT INTO requests (sender_id, target_user_id, listing_id, type, message)
+         VALUES (?, ?, ?, ?, ?)`,
+        [requesterId, target_user_id, listing_id, type, message]
+      );
+
+      // Get created request with details
+      const requests = await query(
+        `SELECT r.*, 
+                ru.name as requester_name, ru.email as requester_email, ru.avatar_url as requester_avatar,
+                tu.name as target_name, tu.email as target_email,
+                l.title as listing_title, l.price as listing_price
+         FROM requests r
+         JOIN users ru ON r.sender_id = ru.id
+         JOIN users tu ON r.target_user_id = tu.id
+         JOIN listings l ON r.listing_id = l.id
+         WHERE r.id = ?`,
+        [result.insertId]
+      );
+
+      // Create conversation for this request
+      const conversationResult = await query(
+        `INSERT INTO conversations (type, request_id, user1_id, user2_id, created_by_user_id)
+         VALUES ('deal', ?, ?, ?, ?)`,
+        [result.insertId, requesterId, target_user_id, requesterId]
+      );
+
+      // Emit real-time notification
+      const io = req.app.get('io');
+      if (io) {
+        io.to(`user_${target_user_id}`).emit('new_request', {
+          request: requests[0],
+          conversation_id: conversationResult.insertId
+        });
+      }
+
+      res.status(201).json({
+        message: 'Request created successfully',
+        request: requests[0],
+        conversation_id: conversationResult.insertId
+      });
+
+    } catch (error) {
+      console.error('Create request error:', error);
+      res.status(500).json({ error: 'Failed to create request' });
+    }
+  }
+);
+
+// Get all requests (admin only)
+router.get('/',
+  verifyToken,
+  requireRole(['admin']),
+  validatePagination,
+  async (req, res) => {
+    try {
+      const page = parseInt(req.query.page) || 1;
+      const limit = parseInt(req.query.limit) || 20;
+      const offset = (page - 1) * limit;
+      const { status, type } = req.query;
+
+      let sql = `
+        SELECT r.*, 
+               ru.name as requester_name, ru.email as requester_email,
+               tu.name as target_name, tu.email as target_email,
+               l.title as listing_title,
+               admin.name as admin_name
+        FROM requests r
+        JOIN users ru ON r.sender_id = ru.id
+        JOIN users tu ON r.target_user_id = tu.id
+        JOIN listings l ON r.listing_id = l.id
+        LEFT JOIN users admin ON r.admin_assigned_id = admin.id
+        WHERE 1=1
+      `;
+      const params = [];
+
+      if (status) {
+        sql += ' AND r.status = ?';
+        params.push(status);
+      }
+
+      if (type) {
+        sql += ' AND r.type = ?';
+        params.push(type);
+      }
+
+      sql += ' ORDER BY r.created_at DESC LIMIT ? OFFSET ?';
+      params.push(limit);
+      params.push(offset);
+
+      const requests = await query(sql, params);
+
+      // Get total count
+      let countSql = 'SELECT COUNT(*) as total FROM requests WHERE 1=1';
+      const countParams = [];
+
+      if (status) {
+        countSql += ' AND status = ?';
+        countParams.push(status);
+      }
+
+      if (type) {
+        countSql += ' AND type = ?';
+        countParams.push(type);
+      }
+
+      const totalResult = await query(countSql, countParams);
+      const total = totalResult[0].total;
+
+      res.json({
+        requests,
+        pagination: {
+          page,
+          limit,
+          total,
+          pages: Math.ceil(total / limit)
+        }
+      });
+
+    } catch (error) {
+      console.error('Get requests error:', error);
+      res.status(500).json({ error: 'Failed to get requests' });
+    }
+  }
+);
+
+// Get my requests (as requester)
+router.get('/my/sent',
+  verifyToken,
+  validatePagination,
+  async (req, res) => {
+    try {
+      const userId = req.user.id;
+      const page = parseInt(req.query.page) || 1;
+      const limit = parseInt(req.query.limit) || 20;
+      const offset = (page - 1) * limit;
+      const status = req.query.status;
+
+      let sql = `
+        SELECT r.*, 
+               tu.name as target_name,
+               l.title as listing_title, l.price as listing_price
+        FROM requests r
+        JOIN users tu ON r.target_user_id = tu.id
+        JOIN listings l ON r.listing_id = l.id
+        WHERE r.sender_id = ?
+      `;
+      const params = [userId];
+
+      if (status) {
+        sql += ' AND r.status = ?';
+        params.push(status);
+      }
+
+      sql += ' ORDER BY r.created_at DESC LIMIT ? OFFSET ?';
+      params.push(limit);
+      params.push(offset);
+
+      const requests = await query(sql, params);
+
+      res.json({ requests });
+
+    } catch (error) {
+      console.error('Get my sent requests error:', error);
+      res.status(500).json({ error: 'Failed to get your sent requests' });
+    }
+  }
+);
+
+// Get requests received (as target)
+router.get('/my/received',
+  verifyToken,
+  validatePagination,
+  async (req, res) => {
+    try {
+      const userId = req.user.id;
+      const page = parseInt(req.query.page) || 1;
+      const limit = parseInt(req.query.limit) || 20;
+      const offset = (page - 1) * limit;
+      const status = req.query.status;
+
+      let sql = `
+        SELECT r.*, 
+               ru.name as requester_name, ru.email as requester_email, ru.avatar_url as requester_avatar,
+               l.title as listing_title, l.price as listing_price
+        FROM requests r
+        JOIN users ru ON r.sender_id = ru.id
+        JOIN listings l ON r.listing_id = l.id
+        WHERE r.target_user_id = ?
+      `;
+      const params = [userId];
+
+      if (status) {
+        sql += ' AND r.status = ?';
+        params.push(status);
+      }
+
+      sql += ' ORDER BY r.created_at DESC LIMIT ? OFFSET ?';
+      params.push(limit);
+      params.push(offset);
+
+      const requests = await query(sql, params);
+
+      res.json({ requests });
+
+    } catch (error) {
+      console.error('Get my received requests error:', error);
+      res.status(500).json({ error: 'Failed to get your received requests' });
+    }
+  }
+);
+
+// Get request by ID
+router.get('/:id',
+  verifyToken,
+  validateId,
+  async (req, res) => {
+    try {
+      const requestId = req.params.id;
+      const userId = req.user.id;
+
+      const requests = await query(
+        `SELECT r.*, 
+                ru.name as requester_name, ru.email as requester_email, ru.avatar_url as requester_avatar,
+                tu.name as target_name, tu.email as target_email,
+                l.title as listing_title, l.price as listing_price, l.description as listing_description,
+                admin.name as admin_name
+         FROM requests r
+         JOIN users ru ON r.sender_id = ru.id
+         JOIN users tu ON r.target_user_id = tu.id
+         JOIN listings l ON r.listing_id = l.id
+         LEFT JOIN users admin ON r.admin_assigned_id = admin.id
+         WHERE r.id = ?`,
+        [requestId]
+      );
+
+      if (requests.length === 0) {
+        return res.status(404).json({ error: 'Request not found' });
+      }
+
+      const request = requests[0];
+
+      // Check if user has permission to view this request
+      if (req.user.role !== 'admin' && 
+          request.sender_id !== userId && 
+          request.target_user_id !== userId) {
+        return res.status(403).json({ error: 'You do not have permission to view this request' });
+      }
+
+      res.json({ request });
+
+    } catch (error) {
+      console.error('Get request error:', error);
+      res.status(500).json({ error: 'Failed to get request' });
+    }
+  }
+);
+
+// Update request status (admin only)
+router.patch('/:id/status',
+  verifyToken,
+  validateId,
+  requireRole(['admin']),
+  autoAuditLog(AUDIT_ACTIONS.UPDATE_REQUEST_STATUS, 'request'),
+  async (req, res) => {
+    try {
+      const requestId = req.params.id;
+      const { status } = req.body;
+      const adminId = req.user.id;
+
+      if (!['approved', 'rejected', 'cancelled'].includes(status)) {
+        return res.status(400).json({ error: 'Invalid status' });
+      }
+
+      // Check if request exists and is pending
+      const requests = await query(
+        'SELECT id, status, sender_id, target_user_id FROM requests WHERE id = ?',
+        [requestId]
+      );
+
+      if (requests.length === 0) {
+        return res.status(404).json({ error: 'Request not found' });
+      }
+
+      const request = requests[0];
+
+      if (request.status !== 'pending') {
+        return res.status(400).json({ error: 'Only pending requests can be updated' });
+      }
+
+      // Update request status
+      await query(
+        `UPDATE requests 
+         SET status = ?, admin_assigned_id = ?, updated_at = CURRENT_TIMESTAMP 
+         WHERE id = ?`,
+        [status, adminId, requestId]
+      );
+
+      // Get updated request
+      const updatedRequests = await query(
+        `SELECT r.*, 
+                ru.name as requester_name,
+                tu.name as target_name,
+                l.title as listing_title
+         FROM requests r
+         JOIN users ru ON r.sender_id = ru.id
+         JOIN users tu ON r.target_user_id = tu.id
+         JOIN listings l ON r.listing_id = l.id
+         WHERE r.id = ?`,
+        [requestId]
+      );
+
+      // Emit real-time notifications
+      const io = req.app.get('io');
+      if (io) {
+        const updatedRequest = updatedRequests[0];
+        io.to(`user_${request.sender_id}`).emit('request_status_updated', updatedRequest);
+        io.to(`user_${request.target_user_id}`).emit('request_status_updated', updatedRequest);
+      }
+
+      res.json({
+        message: `Request ${status} successfully`,
+        request: updatedRequests[0]
+      });
+
+    } catch (error) {
+      console.error('Update request status error:', error);
+      res.status(500).json({ error: 'Failed to update request status' });
+    }
+  }
+);
+
+// Cancel request (requester only, if pending)
+router.patch('/:id/cancel',
+  verifyToken,
+  validateId,
+  autoAuditLog(AUDIT_ACTIONS.CANCEL_REQUEST, 'request'),
+  async (req, res) => {
+    try {
+      const requestId = req.params.id;
+      const userId = req.user.id;
+
+      // Check if request exists and user is the requester
+      const requests = await query(
+        'SELECT id, status, sender_id, target_user_id FROM requests WHERE id = ?',
+        [requestId]
+      );
+
+      if (requests.length === 0) {
+        return res.status(404).json({ error: 'Request not found' });
+      }
+
+      const request = requests[0];
+
+      if (request.sender_id !== userId) {
+        return res.status(403).json({ error: 'You can only cancel your own requests' });
+      }
+
+      if (request.status !== 'pending') {
+        return res.status(400).json({ error: 'Only pending requests can be cancelled' });
+      }
+
+      // Cancel request
+      await query(
+        'UPDATE requests SET status = "cancelled", updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+        [requestId]
+      );
+
+      // Emit real-time notification
+      const io = req.app.get('io');
+      if (io) {
+        io.to(`user_${request.target_user_id}`).emit('request_cancelled', { request_id: requestId });
+      }
+
+      res.json({ message: 'Request cancelled successfully' });
+
+    } catch (error) {
+      console.error('Cancel request error:', error);
+      res.status(500).json({ error: 'Failed to cancel request' });
+    }
+  }
+);
+
+module.exports = router;
