@@ -177,6 +177,23 @@ async function createDatabase() {
         FOREIGN KEY (sender_id) REFERENCES users(id) ON DELETE CASCADE
       )`,
       
+      `CREATE TABLE IF NOT EXISTS events (
+        id INT PRIMARY KEY AUTO_INCREMENT,
+        title VARCHAR(255) NOT NULL,
+        description TEXT,
+        event_date DATETIME NOT NULL,
+        location VARCHAR(255),
+        event_type ENUM('match', 'training', 'meeting', 'tournament', 'announcement') DEFAULT 'announcement',
+        is_active BOOLEAN DEFAULT true,
+        created_by INT NOT NULL,
+        image_url VARCHAR(500),
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE CASCADE,
+        INDEX idx_event_date (event_date),
+        INDEX idx_active_events (is_active, event_date)
+      )`,
+      
       `CREATE TABLE IF NOT EXISTS audit_logs (
         id INT PRIMARY KEY AUTO_INCREMENT,
         user_id INT,
@@ -240,6 +257,16 @@ async function createDatabase() {
       `INSERT IGNORE INTO meetings (request_id, coach_user_id, player_user_id, title, description, meeting_type, status, start_at, end_at, location, created_by) VALUES
       (2, 3, 2, 'Coaching Session', 'Initial coaching consultation', 'training_session', 'scheduled', '2025-09-10 10:00:00', '2025-09-10 11:00:00', 'Local Football Ground', 1),
       (1, 1, 2, 'Player Interview', 'Interview for potential signing', 'interview', 'scheduled', '2025-09-09 14:00:00', '2025-09-09 15:00:00', 'Club Office', 1)`
+    );
+
+    // Add sample events
+    await dbConnection.execute(
+      `INSERT IGNORE INTO events (title, description, event_date, location, event_type, created_by, image_url) VALUES
+      ('Championship Match: City vs United', 'Do not miss the exciting championship match between City and United teams. This is a crucial match for the league standings.', '2025-09-20 15:00:00', 'Central Stadium', 'match', 1, null),
+      ('Weekly Training Session', 'Regular weekly training session for all players. Focus on tactical drills and fitness.', '2025-09-18 18:00:00', 'Training Ground A', 'training', 1, null),
+      ('Youth Tournament Registration Open', 'Registration is now open for the upcoming youth tournament. Open to all players under 18.', '2025-09-25 09:00:00', 'Sports Complex', 'tournament', 1, null),
+      ('Coach Meeting: Season Planning', 'Important meeting for all coaches to discuss the upcoming season plans and strategies.', '2025-09-17 10:00:00', 'Conference Room', 'meeting', 1, null),
+      ('New Player Tryouts', 'Open tryouts for new players interested in joining our academy. All skill levels welcome.', '2025-09-22 14:00:00', 'Main Field', 'announcement', 1, null)`
     );
     
     console.log('Sample data created successfully');

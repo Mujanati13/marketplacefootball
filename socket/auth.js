@@ -6,12 +6,15 @@ const JWT_SECRET = process.env.JWT_SECRET || 'fallback_secret';
 // Socket.IO authentication middleware
 const socketAuth = async (socket, next) => {
   try {
+    console.log('Socket authentication attempt from:', socket.handshake.address);
     const token = socket.handshake.auth.token || socket.handshake.headers.authorization?.split(' ')[1];
     
     if (!token) {
+      console.log('Socket authentication failed: No token provided');
       return next(new Error('Authentication token required'));
     }
 
+    console.log('Socket token received, verifying...');
     // Verify token
     const decoded = jwt.verify(token, JWT_SECRET);
     
@@ -35,6 +38,7 @@ const socketAuth = async (socket, next) => {
     socket.userRole = user.role;
     socket.userEmail = user.email;
 
+    console.log('Socket authentication successful for user:', user.id);
     next();
   } catch (error) {
     console.error('Socket authentication error:', error);

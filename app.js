@@ -24,6 +24,7 @@ const chatRoutes = require('./routes/chat');
 const uploadRoutes = require('./routes/uploads');
 const adminRoutes = require('./routes/admin');
 const adminApiRoutes = require('./routes/admin-api');
+const eventsRoutes = require('./routes/events');
 
 // Import socket handlers
 const socketAuth = require('./socket/auth');
@@ -35,12 +36,16 @@ const server = http.createServer(app);
 // Configure Socket.IO
 const io = socketIo(server, {
   cors: {
-    origin: process.env.NODE_ENV === 'production' 
-      ? ['https://yourdomain.com'] 
-      : ['http://localhost:3000', 'http://127.0.0.1:3000'],
+    origin: (origin, callback) => {
+      // Allow connections from mobile apps (no origin) and web clients
+      console.log('Socket.IO connection attempt from origin:', origin || 'mobile app');
+      callback(null, true);
+    },
     methods: ['GET', 'POST'],
     credentials: true
-  }
+  },
+  allowEIO3: true, // Support older client versions
+  transports: ['polling', 'websocket']
 });
 
 // Security middleware
@@ -49,14 +54,7 @@ app.use(helmet({
 }));
 
 // CORS configuration
-app.use(cors({
-  origin: process.env.NODE_ENV === 'production' 
-    ? ['https://yourdomain.com'] 
-    : ['http://localhost:3000', 'http://127.0.0.1:3000'],
-  credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
-}));
+app.use(cors({}));
 
 // Rate limiting
 const limiter = rateLimit({
@@ -112,6 +110,7 @@ app.use('/api/requests', requestRoutes);
 app.use('/api/meetings', meetingRoutes);
 app.use('/api/chat', chatRoutes);
 app.use('/api/uploads', uploadRoutes);
+app.use('/api/events', eventsRoutes);
 
 // Direct profile routes for players and coaches
 app.use('/api', profileRoutes); // This will handle /api/players and /api/coaches

@@ -123,6 +123,7 @@ router.get('/dashboard', (req, res) => {
                 <p><a href="/api/users">View Users API</a></p>
                 <p><a href="/api/listings">View Listings API</a></p>
                 <p><a href="/api/requests">View Requests API</a></p>
+                <p><a href="/admin/events">Manage Events</a></p>
                 <p><strong>Note:</strong> Use API endpoints for data management.</p>
             </div>
         </div>
@@ -422,6 +423,226 @@ router.get('/meetings', async (req, res) => {
     console.error('Get meetings error:', error);
     res.status(500).json({ error: 'Failed to fetch meetings' });
   }
+});
+
+// Events management page
+router.get('/events', (req, res) => {
+  if (!req.session?.adminUser) {
+    return res.redirect('/admin/login');
+  }
+
+  res.send(`
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Events Management - Football Marketplace Admin</title>
+        <style>
+            body { font-family: Arial, sans-serif; margin: 0; padding: 20px; background: #f5f5f5; }
+            .header { background: white; padding: 20px; border-radius: 8px; margin-bottom: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+            .card { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); margin-bottom: 20px; }
+            .form-group { margin-bottom: 15px; }
+            .form-group label { display: block; margin-bottom: 5px; font-weight: bold; }
+            .form-group input, .form-group textarea, .form-group select { width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; box-sizing: border-box; }
+            .form-group textarea { height: 100px; resize: vertical; }
+            .btn { background: #007bff; color: white; padding: 10px 20px; border: none; border-radius: 4px; cursor: pointer; margin-right: 10px; }
+            .btn:hover { background: #0056b3; }
+            .btn-danger { background: #dc3545; }
+            .btn-danger:hover { background: #c82333; }
+            .events-list { margin-top: 20px; }
+            .event-item { border: 1px solid #ddd; padding: 15px; margin-bottom: 10px; border-radius: 4px; }
+            .event-date { color: #007bff; font-weight: bold; }
+            .event-type { background: #e9ecef; padding: 2px 8px; border-radius: 12px; font-size: 0.8em; margin-left: 10px; }
+            .back-link { color: #007bff; text-decoration: none; }
+            .back-link:hover { text-decoration: underline; }
+        </style>
+    </head>
+    <body>
+        <div class="header">
+            <h1>Events Management</h1>
+            <a href="/admin/dashboard" class="back-link">← Back to Dashboard</a>
+        </div>
+        
+        <div class="card">
+            <h3>Create New Event</h3>
+            <form id="eventForm">
+                <div class="form-group">
+                    <label for="title">Event Title *</label>
+                    <input type="text" id="title" name="title" required>
+                </div>
+                
+                <div class="form-group">
+                    <label for="description">Description</label>
+                    <textarea id="description" name="description" placeholder="Enter event description..."></textarea>
+                </div>
+                
+                <div class="form-group">
+                    <label for="event_date">Event Date & Time *</label>
+                    <input type="datetime-local" id="event_date" name="event_date" required>
+                </div>
+                
+                <div class="form-group">
+                    <label for="location">Location</label>
+                    <input type="text" id="location" name="location" placeholder="Enter event location...">
+                </div>
+                
+                <div class="form-group">
+                    <label for="event_type">Event Type</label>
+                    <select id="event_type" name="event_type">
+                        <option value="announcement">Announcement</option>
+                        <option value="match">Match</option>
+                        <option value="training">Training</option>
+                        <option value="meeting">Meeting</option>
+                        <option value="tournament">Tournament</option>
+                    </select>
+                </div>
+                
+                <div class="form-group">
+                    <label for="image_url">Image URL</label>
+                    <input type="url" id="image_url" name="image_url" placeholder="https://example.com/image.jpg">
+                </div>
+                
+                <button type="submit" class="btn">Create Event</button>
+                <button type="button" class="btn" onclick="clearForm()">Clear</button>
+            </form>
+        </div>
+        
+        <div class="card">
+            <h3>Upcoming Events</h3>
+            <div id="eventsList" class="events-list">
+                Loading events...
+            </div>
+        </div>
+
+        <script>
+            let currentEditId = null;
+
+            // Load events
+            function loadEvents() {
+                fetch('/api/events?limit=50')
+                    .then(response => response.json())
+                    .then(data => {
+                        const eventsList = document.getElementById('eventsList');
+                        if (data.events && data.events.length > 0) {
+                            eventsList.innerHTML = data.events.map(event => {
+                                const eventDate = new Date(event.event_date);
+                                return \`
+                                    <div class="event-item">
+                                        <h4>\${event.title} <span class="event-type">\${event.event_type}</span></h4>
+                                        <p class="event-date">📅 \${eventDate.toLocaleString()}</p>
+                                        \${event.location ? \`<p>📍 \${event.location}</p>\` : ''}
+                                        \${event.description ? \`<p>\${event.description}</p>\` : ''}
+                                        <p><small>Created by: \${event.creator_first_name} \${event.creator_last_name}</small></p>
+                                        <button class="btn" onclick="editEvent(\${event.id})">Edit</button>
+                                        <button class="btn btn-danger" onclick="deleteEvent(\${event.id})">Delete</button>
+                                    </div>
+                                \`;
+                            }).join('');
+                        } else {
+                            eventsList.innerHTML = '<p>No upcoming events found.</p>';
+                        }
+                    })
+                    .catch(error => {
+                        console.error('Failed to load events:', error);
+                        document.getElementById('eventsList').innerHTML = '<p>Failed to load events.</p>';
+                    });
+            }
+
+            // Create or update event
+            document.getElementById('eventForm').addEventListener('submit', function(e) {
+                e.preventDefault();
+                
+                const formData = new FormData(this);
+                const eventData = {
+                    title: formData.get('title'),
+                    description: formData.get('description'),
+                    event_date: formData.get('event_date'),
+                    location: formData.get('location'),
+                    event_type: formData.get('event_type'),
+                    image_url: formData.get('image_url')
+                };
+
+                const url = currentEditId ? \`/api/events/\${currentEditId}\` : '/api/events';
+                const method = currentEditId ? 'PUT' : 'POST';
+
+                fetch(url, {
+                    method: method,
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify(eventData)
+                })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.error) {
+                        alert('Error: ' + data.error);
+                    } else {
+                        alert(currentEditId ? 'Event updated successfully!' : 'Event created successfully!');
+                        clearForm();
+                        loadEvents();
+                    }
+                })
+                .catch(error => {
+                    console.error('Error:', error);
+                    alert('Failed to save event');
+                });
+            });
+
+            // Edit event
+            function editEvent(id) {
+                fetch(\`/api/events/\${id}\`)
+                    .then(response => response.json())
+                    .then(event => {
+                        document.getElementById('title').value = event.title;
+                        document.getElementById('description').value = event.description || '';
+                        document.getElementById('event_date').value = new Date(event.event_date).toISOString().slice(0, 16);
+                        document.getElementById('location').value = event.location || '';
+                        document.getElementById('event_type').value = event.event_type;
+                        document.getElementById('image_url').value = event.image_url || '';
+                        
+                        currentEditId = id;
+                        document.querySelector('button[type="submit"]').textContent = 'Update Event';
+                    })
+                    .catch(error => {
+                        console.error('Failed to load event:', error);
+                        alert('Failed to load event for editing');
+                    });
+            }
+
+            // Delete event
+            function deleteEvent(id) {
+                if (confirm('Are you sure you want to delete this event?')) {
+                    fetch(\`/api/events/\${id}\`, {
+                        method: 'DELETE'
+                    })
+                    .then(response => response.json())
+                    .then(data => {
+                        if (data.error) {
+                            alert('Error: ' + data.error);
+                        } else {
+                            alert('Event deleted successfully!');
+                            loadEvents();
+                        }
+                    })
+                    .catch(error => {
+                        console.error('Error:', error);
+                        alert('Failed to delete event');
+                    });
+                }
+            }
+
+            // Clear form
+            function clearForm() {
+                document.getElementById('eventForm').reset();
+                currentEditId = null;
+                document.querySelector('button[type="submit"]').textContent = 'Create Event';
+            }
+
+            // Load events on page load
+            loadEvents();
+        </script>
+    </body>
+    </html>
+  `);
 });
 
 // Default route

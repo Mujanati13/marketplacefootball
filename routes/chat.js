@@ -239,18 +239,23 @@ router.post('/conversations/:id/messages',
   }
 );
 
-// Create conversation (admin only, for support)
+// Create conversation (support requires admin, general/deal open to all users)
 router.post('/conversations',
   verifyToken,
-  requireRole(['admin']),
   autoAuditLog(AUDIT_ACTIONS.CREATE_CONVERSATION, 'conversation'),
   async (req, res) => {
     try {
-      const adminId = req.user.id;
+      const userId = req.user.id;
+      const userRole = req.user.role;
       const { type, user_ids, request_id, title } = req.body;
 
       if (!['deal', 'general', 'support'].includes(type)) {
         return res.status(400).json({ error: 'Type must be deal, general, or support' });
+      }
+
+      // Only admins can create support conversations
+      if (type === 'support' && userRole !== 'admin') {
+        return res.status(403).json({ error: 'Only admins can create support conversations' });
       }
 
       if (!Array.isArray(user_ids) || user_ids.length === 0) {
@@ -268,24 +273,35 @@ router.post('/conversations',
       }
 
       // For support conversations, create with admin and one user
-      // For other types, create with provided users
-      const user1_id = adminId;
+      // For other types, create with current user and first participant
+      const user1_id = userId;
       const user2_id = user_ids[0]; // For simplicity, use first user
 
       // Create conversation
       const result = await query(
         `INSERT INTO conversations (title, type, request_id, user1_id, user2_id, created_by_user_id)
          VALUES (?, ?, ?, ?, ?, ?)`,
-        [title, type, request_id, user1_id, user2_id, adminId]
+        [title, type, request_id, user1_id, user2_id, userId]
       );
 
       const conversationId = result.insertId;
 
-      // Add participants
-      const participantInserts = [
-        [conversationId, adminId, 'admin'],
-        [conversationId, user2_id, 'member']
-      ];
+      // Add participants based on conversation type
+      let participantInserts;
+      
+      if (type === 'support') {
+        // Support conversations: admin as admin, user as member
+        participantInserts = [
+          [conversationId, userId, 'admin'],
+          [conversationId, user2_id, 'member']
+        ];
+      } else {
+        // General/deal conversations: creator as member, other users as members
+        participantInserts = [
+          [conversationId, userId, 'member'],
+          [conversationId, user2_id, 'member']
+        ];
+      }
 
       for (const [convId, userId, role] of participantInserts) {
         await query(
